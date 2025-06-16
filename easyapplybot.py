@@ -63,8 +63,14 @@ class EasyApplyBot:
                  rate,
                  uploads={},
                  filename='output.csv',
-                 blacklist=[],
-                 blackListTitles=[],
+                 blacklist=['Senior','Java'],
+                 blackListTitles=[
+                     "Promoted",
+                     "Hiring immediately",
+                     "Urgently hiring",
+                     "0 Experience Required",
+                     "Senior"  
+                 ],
                  experience_level=[]
                  ) -> None:
 
@@ -114,7 +120,8 @@ class EasyApplyBot:
             "follow": (By.CSS_SELECTOR, "label[for='follow-company-checkbox']"),
             "upload": (By.NAME, "file"),
             "search": (By.CLASS_NAME, "jobs-search-results-list"),
-            "links": ("xpath", '//div[@data-job-id]'),
+          #  "links": ("xpath", '//div[@data-job-id]'),
+            "links" : (By.CSS_SELECTOR, 'div.job-card-container'),
             "fields": (By.CLASS_NAME, "jobs-easy-apply-form-section__grouping"),
             "radio_select": (By.CSS_SELECTOR, "input[type='radio']"), #need to append [value={}].format(answer)
             "multi_select": (By.XPATH, "//*[contains(@id, 'text-entity-list-form-component')]"),
@@ -177,24 +184,38 @@ class EasyApplyBot:
         log.info("Logging in.....Please wait :)  ")
         self.browser.get("https://www.linkedin.com/login?trk=guest_homepage-basic_nav-header-signin")
         try:
-            user_field = self.browser.find_element("id","username")
-            pw_field = self.browser.find_element("id","password")
-            login_button = self.browser.find_element("xpath",
-                        '//*[@id="organic-div"]/form/div[3]/button')
+            # Wait for elements to load
+            WebDriverWait(self.browser, 10).until(
+                EC.presence_of_element_located((By.ID, "username"))
+            )
+            # Find elements using more reliable selectors
+            user_field = self.browser.find_element(By.ID, "username")
+            pw_field = self.browser.find_element(By.ID, "password")
+            
+            # New login button selector based on current LinkedIn HTML
+            login_button = self.browser.find_element(
+                By.XPATH, '//button[contains(@class, "btn__primary--large") and contains(text(), "Sign in")]'
+            )
+
+            # Fill in credentials
             user_field.send_keys(username)
-            user_field.send_keys(Keys.TAB)
-            time.sleep(2)
             pw_field.send_keys(password)
-            time.sleep(2)
+            
+            # Click login button
             login_button.click()
-            time.sleep(15)
-            # if self.is_present(self.locator["2fa_oneClick"]):
-            #     oneclick_auth = self.browser.find_element(by='id', value='reset-password-submit-button')
-            #     if oneclick_auth is not None:
-            #         log.info("additional authentication required, sleep for 15 seconds so you can do that")
-            #         time.sleep(15)
-            # else:
-            #     time.sleep()
+            time.sleep(5)
+        
+            # Handle 2FA if needed
+            if "two-step-verification" in self.browser.current_url:
+                log.info("2FA required - please complete manually")
+                time.sleep(30)
+                # if self.is_present(self.locator["2fa_oneClick"]):
+                #     oneclick_auth = self.browser.find_element(by='id', value='reset-password-submit-button')
+                #     if oneclick_auth is not None:
+                #         log.info("additional authentication required, sleep for 15 seconds so you can do that")
+                #         time.sleep(15)
+                # else:
+                #     time.sleep()
         except TimeoutException:
             log.info("TimeoutException! Username/password field or login button not found")
 
@@ -202,7 +223,7 @@ class EasyApplyBot:
         self.browser.set_window_size(1, 1)
         self.browser.set_window_position(2000, 2000)
 
-    def start_apply(self, positions, locations) -> None:
+    def start_apply(self, positions, locations, days_old=3, distance=8) -> None:
         start: float = time.time()
         self.fill_data()
         self.positions = positions
@@ -214,26 +235,28 @@ class EasyApplyBot:
             combo: tuple = (position, location)
             if combo not in combos:
                 combos.append(combo)
-                log.info(f"Applying to {position}: {location}")
+                log.info(f"Applying to {position}: {location} (Posted in last {days_old} days, within {distance} km)")
                 location = "&location=" + location
-                self.applications_loop(position, location)
+                self.applications_loop(position, location, days_old, distance)
             if len(combos) > 500:
                 break
 
     # self.finish_apply() --> this does seem to cause more harm than good, since it closes the browser which we usually don't want, other conditions will stop the loop and just break out
 
-    def applications_loop(self, position, location):
-
+    def applications_loop(self, position, location, days_old=3, distance=8):
         count_application = 0
         count_job = 0
         jobs_per_page = 0
         start_time: float = time.time()
 
-        log.info("Looking for jobs.. Please wait..")
+        log.info(f"Looking for jobs posted in last {days_old} days within {distance} km... Please wait..")
 
         self.browser.set_window_position(1, 1)
         self.browser.maximize_window()
-        self.browser, _ = self.next_jobs_page(position, location, jobs_per_page, experience_level=self.experience_level)
+        self.browser, _ = self.next_jobs_page(position, location, jobs_per_page, 
+                                            experience_level=self.experience_level,
+                                            days_old=days_old,
+                                            distance=distance)
         log.info("Looking for jobs.. Please wait..")
 
         while time.time() - start_time < self.MAX_SEARCH_TIME:
@@ -271,15 +294,19 @@ class EasyApplyBot:
                     jobIDs = {} #{Job id: processed_status}
                 
                     # children selector is the container of the job cards on the left
+                    seen_jobs = set()
                     for link in links:
-                            if 'Applied' not in link.text: #checking if applied already
-                                if link.text not in self.blacklist: #checking if blacklisted
-                                    jobID = link.get_attribute("data-job-id")
-                                    if jobID == "search":
-                                        log.debug("Job ID not found, search keyword found instead? {}".format(link.text))
-                                        continue
-                                    else:
-                                        jobIDs[jobID] = "To be processed"
+                            job_hash = hash(link.text)  # Create unique identifier
+                            if job_hash not in seen_jobs:
+                                seen_jobs.add(job_hash)
+                                if 'Applied' not in link.text: #checking if applied already
+                                    if link.text not in self.blacklist: #checking if blacklisted
+                                        jobID = link.get_attribute("data-job-id")
+                                        if jobID == "search":
+                                            log.debug("Job ID not found, search keyword found instead? {}".format(link.text))
+                                            continue
+                                        else:
+                                            jobIDs[jobID] = "To be processed"
                     if len(jobIDs) > 0:
                         self.apply_loop(jobIDs)
                     self.browser, jobs_per_page = self.next_jobs_page(position,
@@ -589,6 +616,8 @@ class EasyApplyBot:
             answer = "1"
         elif "sponsor" in question:
             answer = "No"
+        elif "visa" in question:
+            answer = "No"
         elif 'do you ' in question:
             answer = "Yes"
         elif "have you " in question:
@@ -659,16 +688,29 @@ class EasyApplyBot:
         time.sleep(0.5)
         pyautogui.press('esc')
 
-    def next_jobs_page(self, position, location, jobs_per_page, experience_level=[]):
+    def next_jobs_page(self, position, location, jobs_per_page, experience_level=[], days_old=3, distance=8):
         # Construct the experience level part of the URL
         experience_level_str = ",".join(map(str, experience_level)) if experience_level else ""
         experience_level_param = f"&f_E={experience_level_str}" if experience_level_str else ""
-        self.browser.get(
-            # URL for jobs page
-            "https://www.linkedin.com/jobs/search/?f_LF=f_AL&keywords=" +
-            position + location + "&start=" + str(jobs_per_page) + experience_level_param)
-        #self.avoid_lock()
-        log.info("Loading next job page?")
+        
+        # Add posting date filter (f_TPR=r259200 means last 3 days in seconds)
+        date_filter = f"&f_TPR=r{days_old*86400}"
+        
+        # Add distance filter
+        distance_filter = f"&distance={distance}"
+        
+        url = (
+            f"https://www.linkedin.com/jobs/search/?"
+            f"keywords={position}"
+            f"&location={location}"
+            f"&start={jobs_per_page}"
+            f"&f_TPR=r{days_old*86400}"  # Posted in last X days
+            f"&distance={distance}"      # Within X miles/km
+            f"&f_AL=true"                # Easy Apply filter
+            f"&f_E={','.join(map(str, experience_level))}"  # Experience levels
+            )
+        self.browser.get(url)
+        log.info("Loading next job page...")
         self.load_page()
         return (self.browser, jobs_per_page)
 
@@ -709,6 +751,9 @@ if __name__ == '__main__':
 
     locations: list = [l for l in parameters['locations'] if l is not None]
     positions: list = [p for p in parameters['positions'] if p is not None]
+    # Get filters from config or use defaults
+    days_old = parameters.get('days_old', 3)
+    distance = parameters.get('distance', 8)
 
     bot = EasyApplyBot(parameters['username'],
                        parameters['password'],
