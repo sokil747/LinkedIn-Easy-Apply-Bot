@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta
 import getpass
 from pathlib import Path
+import requests
 
 import pandas as pd
 import pyautogui
@@ -63,13 +64,20 @@ class EasyApplyBot:
                  rate,
                  uploads={},
                  filename='output.csv',
-                 blacklist=['Senior','Java'],
+                 blacklist=[
+                     'Senior',
+                     'Java',
+                     'Oracle',
+                     'Scientist',
+                     ],
                  blackListTitles=[
                      "Promoted",
                      "Hiring immediately",
                      "Urgently hiring",
                      "0 Experience Required",
-                     "Senior"  
+                     "Senior",
+                     "Oracle",
+                     "Scientist"  
                  ],
                  experience_level=[]
                  ) -> None:
@@ -229,15 +237,17 @@ class EasyApplyBot:
         self.positions = positions
         self.locations = locations
         combos: list = []
+        
         while len(combos) < len(positions) * len(locations):
             position = positions[random.randint(0, len(positions) - 1)]
             location = locations[random.randint(0, len(locations) - 1)]
             combo: tuple = (position, location)
+            
             if combo not in combos:
                 combos.append(combo)
                 log.info(f"Applying to {position}: {location} (Posted in last {days_old} days, within {distance} km)")
-                location = "&location=" + location
                 self.applications_loop(position, location, days_old, distance)
+                
             if len(combos) > 500:
                 break
 
@@ -347,6 +357,8 @@ class EasyApplyBot:
 
         # word filter to skip positions not wanted
         if button is not False:
+            print("title: {}".format(self.browser.title))
+          
             if any(word in self.browser.title for word in blackListTitles):
                 log.info('skipping this application, a blacklisted keyword was found in the job position')
                 string_easy = "* Contains blacklisted keyword"
@@ -354,6 +366,7 @@ class EasyApplyBot:
             else:
                 string_easy = "* has Easy Apply Button"
                 log.info("Clicking the EASY apply button")
+                time.sleep(1000)
                 button.click()
                 clicked = True
                 time.sleep(1)
@@ -450,52 +463,73 @@ class EasyApplyBot:
 
     def send_resume(self) -> bool:
         def is_present(button_locator) -> bool:
-            return len(self.browser.find_elements(button_locator[0],
-                                                  button_locator[1])) > 0
+            return len(self.browser.find_elements(*button_locator)) > 0
 
         try:
-            #time.sleep(random.uniform(1.5, 2.5))
-            next_locator = (By.CSS_SELECTOR,
-                            "button[aria-label='Continue to next step']")
-            review_locator = (By.CSS_SELECTOR,
-                              "button[aria-label='Review your application']")
-            submit_locator = (By.CSS_SELECTOR,
-                              "button[aria-label='Submit application']")
-            error_locator = (By.CLASS_NAME,"artdeco-inline-feedback__message")
+            # Get job title for resume selection
+            job_title = ""
+            try:
+                job_title_element = self.wait.until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "jobs-unified-top-card__job-title"))
+                )
+                job_title = job_title_element.text.lower()
+            except Exception as e:
+                log.warning(f"Could not get job title: {e}")
+            
+            # Select resume based on keywords
+            selected_resume = self.uploads["Resume"]  # Default fallback
+            if hasattr(self, 'config') and 'resumes' in self.config.get('uploads', {}):
+                for resume in self.config['uploads']['resumes']:
+                    if any(keyword.lower() in job_title for keyword in resume.get('keywords', [])):
+                        selected_resume = resume['path']
+                        log.info(f"Selected resume based on keywords: {resume['name']}")
+                        break
+
+            # Locators
+            next_locator = (By.CSS_SELECTOR, "button[aria-label='Continue to next step']")
+            review_locator = (By.CSS_SELECTOR, "button[aria-label='Review your application']")
+            submit_locator = (By.CSS_SELECTOR, "button[aria-label='Submit application']")
+            error_locator = (By.CLASS_NAME, "artdeco-inline-feedback__message")
             upload_resume_locator = (By.XPATH, '//span[text()="Upload resume"]')
             upload_cv_locator = (By.XPATH, '//span[text()="Upload cover letter"]')
-            # WebElement upload_locator = self.browser.find_element(By.NAME, "file")
             follow_locator = (By.CSS_SELECTOR, "label[for='follow-company-checkbox']")
 
             submitted = False
             loop = 0
             while loop < 2:
                 time.sleep(1)
+                
                 # Upload resume
                 if is_present(upload_resume_locator):
-                    #upload_locator = self.browser.find_element(By.NAME, "file")
                     try:
-                        resume_locator = self.browser.find_element(By.XPATH, "//*[contains(@id, 'jobs-document-upload-file-input-upload-resume')]")
-                        resume = self.uploads["Resume"]
-                        resume_locator.send_keys(resume)
+                        resume_locator = self.browser.find_element(
+                            By.XPATH, 
+                            "//*[contains(@id, 'jobs-document-upload-file-input-upload-resume')]"
+                        )
+                        resume_locator.send_keys(selected_resume)
                     except Exception as e:
-                        log.error(e)
-                        log.error("Resume upload failed")
-                        log.debug("Resume: " + resume)
-                        log.debug("Resume Locator: " + str(resume_locator))
-                # Upload cover letter if possible
-                if is_present(upload_cv_locator):
-                    cv = self.uploads["Cover Letter"]
-                    cv_locator = self.browser.find_element(By.XPATH, "//*[contains(@id, 'jobs-document-upload-file-input-upload-cover-letter')]")
-                    cv_locator.send_keys(cv)
+                        log.error(f"Resume upload failed: {e}")
+                        log.debug(f"Resume: {selected_resume}")
 
-                    #time.sleep(random.uniform(4.5, 6.5))
+                # Upload cover letter if available
+                if is_present(upload_cv_locator) and "Cover Letter" in self.uploads:
+                    try:
+                        cv_locator = self.browser.find_element(
+                            By.XPATH, 
+                            "//*[contains(@id, 'jobs-document-upload-file-input-upload-cover-letter')]"
+                        )
+                        cv_locator.send_keys(self.uploads["Cover Letter"])
+                    except Exception as e:
+                        log.error(f"Cover letter upload failed: {e}")
+
+                # Handle follow checkbox if present
                 elif len(self.get_elements("follow")) > 0:
                     elements = self.get_elements("follow")
                     for element in elements:
                         button = self.wait.until(EC.element_to_be_clickable(element))
                         button.click()
 
+                # Submit application if possible
                 if len(self.get_elements("submit")) > 0:
                     elements = self.get_elements("submit")
                     for element in elements:
@@ -505,6 +539,7 @@ class EasyApplyBot:
                         submitted = True
                         break
 
+                # Handle errors or additional questions
                 elif len(self.get_elements("error")) > 0:
                     elements = self.get_elements("error")
                     if "application was sent" in self.browser.page_source:
@@ -529,14 +564,13 @@ class EasyApplyBot:
                                 submitted = False
                                 break
                         continue
-                        #add explicit wait
-                    
+
                     else:
                         log.info("Application not submitted")
                         time.sleep(2)
                         break
-                    # self.process_questions()
 
+                # Continue through application steps
                 elif len(self.get_elements("next")) > 0:
                     elements = self.get_elements("next")
                     for element in elements:
@@ -555,13 +589,15 @@ class EasyApplyBot:
                         button = self.wait.until(EC.element_to_be_clickable(element))
                         button.click()
 
+                loop += 1
+
         except Exception as e:
-            log.error(e)
-            log.error("cannot apply to this job")
-            pass
-            #raise (e)
+            log.error(f"Error in send_resume: {e}")
+            log.error("Cannot apply to this job")
+            return False
 
         return submitted
+        
     def process_questions(self):
         time.sleep(1)
         form = self.get_elements("fields") #self.browser.find_elements(By.CLASS_NAME, "jobs-easy-apply-form-section__grouping")
@@ -689,33 +725,57 @@ class EasyApplyBot:
         pyautogui.press('esc')
 
     def next_jobs_page(self, position, location, jobs_per_page, experience_level=[], days_old=3, distance=8):
-        # Construct the experience level part of the URL
-        experience_level_str = ",".join(map(str, experience_level)) if experience_level else ""
-        experience_level_param = f"&f_E={experience_level_str}" if experience_level_str else ""
-        
-        # Add posting date filter (f_TPR=r259200 means last 3 days in seconds)
-        date_filter = f"&f_TPR=r{days_old*86400}"
-        
-        # Add distance filter
-        distance_filter = f"&distance={distance}"
-        
-        url = (
-            f"https://www.linkedin.com/jobs/search/?"
-            f"keywords={position}"
-            f"&location={location}"
-            f"&start={jobs_per_page}"
-            f"&f_TPR=r{days_old*86400}"  # Posted in last X days
-            f"&distance={distance}"      # Within X miles/km
-            f"&f_AL=true"                # Easy Apply filter
-            f"&f_E={','.join(map(str, experience_level))}"  # Experience levels
-            )
-        self.browser.get(url)
-        log.info("Loading next job page...")
-        self.load_page()
-        return (self.browser, jobs_per_page)
-
-    # def finish_apply(self) -> None:
-    #     self.browser.close()
+        """Constructs the URL with proper filters for job search"""
+        try:
+            # URL encode the position and location
+            position_encoded = requests.utils.quote(position)
+            
+            # Handle special location cases
+            #if "remote" in location.lower():
+            #    location_param = "&f_WT=2"  # Remote filter
+            #else:
+            location_encoded = requests.utils.quote(location)
+            location_param = f"&location={location_encoded}"
+            
+            # Base URL
+            url = "https://www.linkedin.com/jobs/search/?"
+            
+            # Add keywords
+            url += f"keywords={position_encoded}"
+            # Add location
+            url += location_param
+            #print(f'current url: {url} ')
+            # Add pagination
+            url += f"&start={jobs_per_page}"
+            
+            # Add date filter (r259200 means last 3 days in seconds)
+            if days_old:
+                seconds = days_old * 86400
+                url += f"&f_TPR=r{seconds}"
+            
+            # Add distance filter (only for non-remote locations)
+            if distance and "remote" not in location.lower():
+                url += f"&distance={distance}"
+            
+            # Add Easy Apply filter
+            url += "&f_AL=true"
+            
+            # Add experience level filters if specified
+            if experience_level:
+                url += f"&f_E={','.join(map(str, experience_level))}"
+            
+            # Add job type filter (Full-time)
+            url += "&f_JT=F"
+            
+            log.info(f"Loading jobs page with URL: {url}")
+            
+            self.browser.get(url)
+            self.load_page()
+            
+            return (self.browser, jobs_per_page + 25)
+        except Exception as e:
+            log.error(f"Error in next_jobs_page: {e}")
+            return (self.browser, jobs_per_page)
 
 
 if __name__ == '__main__':
