@@ -1,0 +1,33 @@
+username: "YOUR_LINKEDIN_EMAIL"
+password: "YOUR_LINKEDIN_PASSWORD"
+phone_number: "+YOUR_PHONE_NUMBER"
+
+positions:
+  - Data analyst
+  - Software engineer
+
+locations:
+  - Remote
+  - Limerick
+
+salary: 30000
+rate: 16
+
+uploads:
+  resumes:
+    - name: "Default Resume"
+      path: "path/to/your/resume.pdf"
+      keywords: ["default"]
+
+output_filename: "output.csv"
+
+blacklist:
+  - Senior
+  - Java
+
+experience_level:
+  - 1
+  - 2
+
+days_old: 3
+distance: 8

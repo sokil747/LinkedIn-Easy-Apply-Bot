@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import getpass
 from pathlib import Path
 import requests
-
+from dotenv import load_dotenv
 import pandas as pd
 import pyautogui
 import yaml
@@ -29,6 +29,8 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 import webdriver_manager.chrome as ChromeDriverManager
 ChromeDriverManager = ChromeDriverManager.ChromeDriverManager
 
+# Load environment variables from .env file
+load_dotenv()
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +106,10 @@ class EasyApplyBot:
         self.uploads = uploads
         self.salary = salary
         self.rate = rate
+        # Get credentials from environment
+        self.username = os.getenv('LINKEDIN_USERNAME')
+        self.password = os.getenv('LINKEDIN_PASSWORD')
+        self.phone_number = os.getenv('LINKEDIN_PHONE')
         # self.profile_path = profile_path
         past_ids: list | None = self.get_appliedIDs(filename)
         self.appliedJobIDs: list = past_ids if past_ids != None else []
@@ -954,7 +960,10 @@ class EasyApplyBot:
 
 
 if __name__ == '__main__':
-
+    
+    # Load environment variables first
+    load_dotenv()
+    
     with open("config.yaml", 'r') as stream:
         try:
             parameters = yaml.safe_load(stream)
