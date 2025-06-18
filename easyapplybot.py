@@ -69,15 +69,15 @@ class EasyApplyBot:
                      'Java',
                      'Oracle',
                      'Scientist',
-                     ],
+                 ],
                  blackListTitles=[
-                     "Promoted",
-                     "Hiring immediately",
-                     "Urgently hiring",
-                     "0 Experience Required",
-                     "Senior",
-                     "Oracle",
-                     "Scientist"  
+                    r"senior",  # will match any case
+                    r"oracle\b",  # will match "oracle" but not "oracle's"
+                    r"scientist\b",
+                    r"\bpromoted\b",
+                    r"hiring\s*immediately",  # handles variations
+                    r"urgently\s*hiring",
+                    r"0\s*experience\s*required", 
                  ],
                  experience_level=[]
                  ) -> None:
@@ -109,8 +109,23 @@ class EasyApplyBot:
         self.appliedJobIDs: list = past_ids if past_ids != None else []
         self.filename: str = filename
         self.options = self.browser_options()
-        self.browser = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=self.options)
-        self.wait = WebDriverWait(self.browser, 30)
+
+        try:
+            self.browser = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), 
+                        options=self.options)
+            self.wait = WebDriverWait(self.browser, 30)
+        except Exception as e:
+            log.error(f"Failed to initialize browser: {e}")
+            raise
+        
+         # Attempt login
+        if not self.start_linkedin(username, password):
+            self.browser.save_screenshot("final_login_failure.png")
+            self.browser.quit()
+            raise Exception("Critical login failure - check screenshots")
+    
+        #self.browser = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=self.options)
+        #self.wait = WebDriverWait(self.browser, 30)
         self.blacklist = blacklist
         self.blackListTitles = blackListTitles
         self.start_linkedin(username, password)
@@ -135,7 +150,12 @@ class EasyApplyBot:
             "multi_select": (By.XPATH, "//*[contains(@id, 'text-entity-list-form-component')]"),
             "text_select": (By.CLASS_NAME, "artdeco-text-input--input"),
             "2fa_oneClick": (By.ID, 'reset-password-submit-button'),
-            "easy_apply_button": (By.XPATH, '//button[contains(@class, "jobs-apply-button")]')
+            "easy_apply_button": (By.XPATH, '//button[contains(@class, "jobs-apply-button")]'),
+            "welcome_back_account": (By.XPATH, "//button[contains(@class, 'active-account')]"),
+            "welcome_back_account": (By.XPATH, "//button[contains(@class, 'active-account')]"),
+            "login_username": (By.ID, "username"),
+            "login_password": (By.ID, "password"),
+            "login_button": (By.XPATH, "//button[@type='submit' and contains(., 'Sign in')]"),
 
         }
 
@@ -152,7 +172,32 @@ class EasyApplyBot:
         else:
             df = pd.DataFrame(columns=["Question", "Answer"])
             df.to_csv(self.qa_file, index=False, encoding='utf-8')
+        
+         # Login with retry logic
+        login_success = False
+        for attempt in range(3):
+            try:
+                self.start_linkedin(username, password)
+                if self.verify_login():
+                    login_success = True
+                    break
+                else:
+                    log.warning(f"Login verification failed (attempt {attempt + 1}/3)")
+                    self.clear_browser_data()
+                    time.sleep(5)
+            except Exception as e:
+                log.error(f"Login attempt {attempt + 1} failed: {e}")
+                self.browser.save_screenshot(f"login_fail_attempt_{attempt + 1}.png")
+                if attempt < 2:  # Don't sleep on last attempt
+                    time.sleep(10)
 
+        if not login_success:
+            log.error("Failed to login after 3 attempts")
+            self.browser.save_screenshot("final_login_failure.png")
+            self.browser.quit()
+            raise Exception("Login failed - please check screenshots and try manually")
+
+        log.info("Login successful, bot is ready")
 
     def get_appliedIDs(self, filename) -> list | None:
         try:
@@ -173,59 +218,134 @@ class EasyApplyBot:
 
     def browser_options(self):
         options = webdriver.ChromeOptions()
+        
+        # Set up persistent profile to avoid "new device" emails
+        profile_path = os.path.join(os.getcwd(), 'linkedin_profile')
+        if not os.path.exists(profile_path):
+            os.makedirs(profile_path)
+        options.add_argument(f"user-data-dir={profile_path}")
+        
+        # Anti-detection settings
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # Standard options
         options.add_argument("--start-maximized")
         options.add_argument("--ignore-certificate-errors")
         options.add_argument('--no-sandbox')
         options.add_argument("--disable-extensions")
-        #options.add_argument(r'--remote-debugging-port=9222')
-        #options.add_argument(r'--profile-directory=Person 1')
-
-        # Disable webdriver flags or you will be easily detectable
-        options.add_argument("--disable-blink-features")
-        options.add_argument("--disable-blink-features=AutomationControlled")
-
-        # Load user profile
-        #options.add_argument(r"--user-data-dir={}".format(self.profile_path))
-        return options
-
-    def start_linkedin(self, username, password) -> None:
-        log.info("Logging in.....Please wait :)  ")
-        self.browser.get("https://www.linkedin.com/login?trk=guest_homepage-basic_nav-header-signin")
-        try:
-            # Wait for elements to load
-            WebDriverWait(self.browser, 10).until(
-                EC.presence_of_element_located((By.ID, "username"))
-            )
-            # Find elements using more reliable selectors
-            user_field = self.browser.find_element(By.ID, "username")
-            pw_field = self.browser.find_element(By.ID, "password")
-            
-            # New login button selector based on current LinkedIn HTML
-            login_button = self.browser.find_element(
-                By.XPATH, '//button[contains(@class, "btn__primary--large") and contains(text(), "Sign in")]'
-            )
-
-            # Fill in credentials
-            user_field.send_keys(username)
-            pw_field.send_keys(password)
-            
-            # Click login button
-            login_button.click()
-            time.sleep(5)
         
-            # Handle 2FA if needed
-            if "two-step-verification" in self.browser.current_url:
-                log.info("2FA required - please complete manually")
-                time.sleep(30)
-                # if self.is_present(self.locator["2fa_oneClick"]):
-                #     oneclick_auth = self.browser.find_element(by='id', value='reset-password-submit-button')
-                #     if oneclick_auth is not None:
-                #         log.info("additional authentication required, sleep for 15 seconds so you can do that")
-                #         time.sleep(15)
-                # else:
-                #     time.sleep()
+        return options
+        
+        return options
+    def verify_login(self, timeout=15) -> bool:
+        """Verify successful login by checking for feed page or profile"""
+        try:
+            WebDriverWait(self.browser, timeout).until(
+                lambda d: any(
+                    url in d.current_url 
+                    for url in ["feed", "in/", "two-step-verification"]
+                )
+            )
+            return True
         except TimeoutException:
-            log.info("TimeoutException! Username/password field or login button not found")
+            log.error(f"Login verification timeout. Current URL: {self.browser.current_url}")
+            self.browser.save_screenshot("login_verification_failed.png")
+            return False
+    
+    def human_delay(self, min_sec=0.5, max_sec=2.0):
+        """Random delay to mimic human behavior"""
+        delay = random.uniform(min_sec, max_sec)
+        time.sleep(delay)
+
+
+    def clear_browser_data(self):
+        """Clear all browser data to prevent session conflicts"""
+        try:
+            self.browser.delete_all_cookies()
+            self.browser.execute_script("window.localStorage.clear();")
+            self.browser.execute_script("window.sessionStorage.clear();")
+            log.info("Browser data cleared successfully")
+        except Exception as e:
+            log.error(f"Failed to clear browser data: {e}")
+
+    def start_linkedin(self, username, password, max_attempts=3) -> bool:
+        for attempt in range(1, max_attempts + 1):
+            try:
+                log.info(f"Attempt {attempt}/{max_attempts}: Loading LinkedIn login page")
+                self.browser.get("https://www.linkedin.com/login")
+                
+                # Check for "Welcome Back" account selection
+                try:
+                    account_buttons = WebDriverWait(self.browser, 5).until(
+                        EC.presence_of_all_elements_located((By.XPATH, "//button[contains(@class, 'active-account')]"))
+                    )
+                    if account_buttons:
+                        log.info("Found 'Welcome Back' account selection")
+                        account_buttons[0].click()  # Click the first account
+                        time.sleep(2)
+                except TimeoutException:
+                    pass  # No account selection page found
+                
+                # Wait for login form (with more flexible waiting)
+                try:
+                    login_form = WebDriverWait(self.browser, 10).until(
+                        EC.presence_of_element_located((By.ID, "username"))
+                    )
+                except TimeoutException:
+                    # Maybe already logged in?
+                    if "feed" in self.browser.current_url:
+                        log.info("Already logged in from previous session")
+                        return True
+                    raise
+                
+                # Fill credentials
+                username_field = self.browser.find_element(By.ID, "username")
+                password_field = self.browser.find_element(By.ID, "password")
+                
+                # Clear fields and type slowly
+                username_field.clear()
+                for char in username:
+                    username_field.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.2))
+                    
+                password_field.clear()
+                for char in password:
+                    password_field.send_keys(char)
+                    time.sleep(random.uniform(0.05, 0.2))
+                
+                # Find and click login button
+                login_button = WebDriverWait(self.browser, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, "//button[@type='submit' and contains(., 'Sign in')]"))
+                )
+                login_button.click()
+                
+                # Check for 2FA
+                try:
+                    WebDriverWait(self.browser, 5).until(
+                        lambda d: "two-step-verification" in d.current_url
+                    )
+                    log.info("2FA required - please complete manually")
+                    time.sleep(20)  # Give time to complete 2FA
+                except TimeoutException:
+                    pass
+                
+                # Verify successful login
+                if self.verify_login():
+                    log.info("Login successful")
+                    return True
+                    
+            except Exception as e:
+                log.error(f"Attempt {attempt} failed: {str(e)}")
+                self.browser.save_screenshot(f"login_error_attempt_{attempt}.png")
+                if attempt < max_attempts:
+                    log.info("Clearing cookies and retrying...")
+                    self.clear_browser_data()
+                    time.sleep(5)
+        
+        log.error(f"Failed to login after {max_attempts} attempts")
+        return False
 
     def fill_data(self) -> None:
         self.browser.set_window_size(1, 1)
@@ -258,80 +378,103 @@ class EasyApplyBot:
         count_job = 0
         jobs_per_page = 0
         start_time: float = time.time()
-
-        log.info(f"Looking for jobs posted in last {days_old} days within {distance} km... Please wait..")
-
-        self.browser.set_window_position(1, 1)
-        self.browser.maximize_window()
-        self.browser, _ = self.next_jobs_page(position, location, jobs_per_page, 
-                                            experience_level=self.experience_level,
-                                            days_old=days_old,
-                                            distance=distance)
-        log.info("Looking for jobs.. Please wait..")
-
-        while time.time() - start_time < self.MAX_SEARCH_TIME:
+        consecutive_empty_pages = 0  # Track empty pages
+        
+        while time.time() - start_time < self.MAX_SEARCH_TIME and consecutive_empty_pages < 3:
             try:
-                log.info(f"{(self.MAX_SEARCH_TIME - (time.time() - start_time)) // 60} minutes left in this search")
-
-                # sleep to make sure everything loads, add random to make us look human.
-                randoTime: float = random.uniform(1.5, 2.9)
-                log.debug(f"Sleeping for {round(randoTime, 1)}")
-                #time.sleep(randoTime)
-                self.load_page(sleep=0.5)
-
-                # LinkedIn displays the search results in a scrollable <div> on the left side, we have to scroll to its bottom
-
-                # scroll to bottom
-
-                if self.is_present(self.locator["search"]):
-                    scrollresults = self.get_elements("search")
-                    #     self.browser.find_element(By.CLASS_NAME,
-                    #     "jobs-search-results-list"
-                    # )
-                    # Selenium only detects visible elements; if we scroll to the bottom too fast, only 8-9 results will be loaded into IDs list
-                    for i in range(300, 3000, 100):
-                        self.browser.execute_script("arguments[0].scrollTo(0, {})".format(i), scrollresults[0])
-                    scrollresults = self.get_elements("search")
-                    #time.sleep(1)
-
-                # get job links, (the following are actually the job card objects)
+                # Your existing code...
+                
                 if self.is_present(self.locator["links"]):
                     links = self.get_elements("links")
-                # links = self.browser.find_elements("xpath",
-                #     '//div[@data-job-id]'
-                # )
-
-                    jobIDs = {} #{Job id: processed_status}
-                
-                    # children selector is the container of the job cards on the left
+                    jobIDs = {}
                     seen_jobs = set()
+                    
                     for link in links:
-                            job_hash = hash(link.text)  # Create unique identifier
-                            if job_hash not in seen_jobs:
-                                seen_jobs.add(job_hash)
-                                if 'Applied' not in link.text: #checking if applied already
-                                    if link.text not in self.blacklist: #checking if blacklisted
-                                        jobID = link.get_attribute("data-job-id")
-                                        if jobID == "search":
-                                            log.debug("Job ID not found, search keyword found instead? {}".format(link.text))
-                                            continue
-                                        else:
-                                            jobIDs[jobID] = "To be processed"
-                    if len(jobIDs) > 0:
+                        job_hash = hash(link.text)
+                        if job_hash not in seen_jobs:
+                            seen_jobs.add(job_hash)
+                            if 'Applied' not in link.text:
+                                job_title = link.text
+                                if not self.is_blacklisted(job_title):
+                                    jobID = link.get_attribute("data-job-id")
+                                    if jobID and jobID != "search":
+                                        jobIDs[jobID] = "To be processed"
+                    
+                    if jobIDs:
+                        consecutive_empty_pages = 0  # Reset counter if jobs found
                         self.apply_loop(jobIDs)
-                    self.browser, jobs_per_page = self.next_jobs_page(position,
-                                                                      location,
-                                                                      jobs_per_page, 
-                                                                      experience_level=self.experience_level)
+                    else:
+                        consecutive_empty_pages += 1
+                        log.info(f"No new jobs found (empty page {consecutive_empty_pages}/3)")
+                        
+                    # Only increment page if we found jobs
+                    if jobIDs:
+                        self.browser, jobs_per_page = self.next_jobs_page(
+                            position, location, jobs_per_page, 
+                            experience_level=self.experience_level
+                        )
+                    else:
+                        # Try refreshing current page instead of going to next
+                        self.browser.refresh()
+                        time.sleep(2)
                 else:
-                    self.browser, jobs_per_page = self.next_jobs_page(position,
-                                                                      location,
-                                                                      jobs_per_page, 
-                                                                      experience_level=self.experience_level)
-
-
+                    consecutive_empty_pages += 1
+                    log.info(f"No job links found (empty page {consecutive_empty_pages}/3)")
+                    
+                # Break if we've seen too many empty pages
+                if consecutive_empty_pages >= 3:
+                    log.info("Stopping search - too many consecutive empty pages")
+                    break
+                    
             except Exception as e:
-                print(e)
+                log.error(f"Error in applications_loop: {e}")
+                consecutive_empty_pages += 1
+    
+    def get_job_title(self) -> str:
+        """More robust job title extraction"""
+        try:
+            # Try multiple possible selectors for job title
+            selectors = [
+                ".jobs-unified-top-card__job-title",
+                ".job-details-jobs-unified-top-card__job-title",
+                "h1",  # Fallback to any h1
+                ".t-24"  # LinkedIn often uses t-24 class for titles
+            ]
+            
+            for selector in selectors:
+                try:
+                    title_element = self.wait.until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    return title_element.text.strip()
+                except:
+                    continue
+                    
+            # Final fallback to browser title
+            return self.browser.title.split('|')[0].strip()
+            
+        except Exception as e:
+            log.error(f"Failed to extract job title: {str(e)}")
+            return "Unknown Position"
+
+    def is_blacklisted(self, title: str) -> bool:
+        """More comprehensive blacklist checking"""
+        if not title or title == "Unknown Position":
+            return False
+            
+        title_lower = title.lower()
+        patterns = [
+            r'\bsenior\b',
+            r'\bjava\b',
+            r'\boracle\b',
+            r'\bscientist\b',
+            r'\bpromoted\b',
+            r'hiring\s*(immediately|urgently)',
+            r'0?\s*experience\s*required'
+        ]
+        
+        return any(re.search(pattern, title_lower) for pattern in patterns)
+
     def apply_loop(self, jobIDs):
         for jobID in jobIDs:
             if jobIDs[jobID] == "To be processed":
@@ -351,6 +494,13 @@ class EasyApplyBot:
         # let page load
         time.sleep(1)
 
+        # Check title against blacklist BEFORE proceeding
+        title = self.get_job_title()
+        if self.is_blacklisted(title):
+            log.info(f'Skipping blacklisted job: {title}')
+            self.write_to_file(False, jobID, title, False)
+            return False
+
         # get easy apply button
         button = self.get_easy_apply_button()
 
@@ -359,14 +509,14 @@ class EasyApplyBot:
         if button is not False:
             print("title: {}".format(self.browser.title))
           
-            if any(word in self.browser.title for word in blackListTitles):
+            if self.is_blacklisted(self.browser.title):
                 log.info('skipping this application, a blacklisted keyword was found in the job position')
                 string_easy = "* Contains blacklisted keyword"
                 result = False
             else:
                 string_easy = "* has Easy Apply Button"
                 log.info("Clicking the EASY apply button")
-                time.sleep(1000)
+                time.sleep(10)
                 button.click()
                 clicked = True
                 time.sleep(1)
@@ -411,10 +561,22 @@ class EasyApplyBot:
 
     def get_job_page(self, jobID):
 
-        job: str = 'https://www.linkedin.com/jobs/view/' + str(jobID)
-        self.browser.get(job)
-        self.job_page = self.load_page(sleep=0.5)
-        return self.job_page
+        job_url = f'https://www.linkedin.com/jobs/view/{jobID}'
+        self.browser.get(job_url)
+        
+        # Verify page loaded properly
+        try:
+            self.wait.until(
+                lambda driver: driver.execute_script("return document.readyState") == "complete"
+            )
+            self.wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".jobs-unified-top-card"))
+            )
+        except TimeoutException:
+            log.error("Job page failed to load properly")
+            return False
+            
+        return self.load_page(sleep=0.5)
 
     def get_easy_apply_button(self):
         EasyApplyButton = False
@@ -462,139 +624,152 @@ class EasyApplyBot:
                                               locator[1])) > 0
 
     def send_resume(self) -> bool:
-        def is_present(button_locator) -> bool:
-            return len(self.browser.find_elements(*button_locator)) > 0
+        # Check if resume is configured
+        if "resumes" not in self.uploads or not self.uploads["resumes"]:
+            log.error("No resumes configured in uploads")
+            return False
+        
+        # Default to first resume
+        selected_resume = self.uploads["resumes"][-1]["path"]
+
+        #def is_present(button_locator) -> bool:
+        #    return len(self.browser.find_elements(*button_locator)) > 0
 
         try:
             # Get job title for resume selection
-            job_title = ""
-            try:
-                job_title_element = self.wait.until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "jobs-unified-top-card__job-title"))
-                )
-                job_title = job_title_element.text.lower()
-            except Exception as e:
-                log.warning(f"Could not get job title: {e}")
+            job_title = self.get_job_title().lower()
             
-            # Select resume based on keywords
-            selected_resume = self.uploads["Resume"]  # Default fallback
-            if hasattr(self, 'config') and 'resumes' in self.config.get('uploads', {}):
-                for resume in self.config['uploads']['resumes']:
-                    if any(keyword.lower() in job_title for keyword in resume.get('keywords', [])):
-                        selected_resume = resume['path']
-                        log.info(f"Selected resume based on keywords: {resume['name']}")
-                        break
-
-            # Locators
-            next_locator = (By.CSS_SELECTOR, "button[aria-label='Continue to next step']")
-            review_locator = (By.CSS_SELECTOR, "button[aria-label='Review your application']")
-            submit_locator = (By.CSS_SELECTOR, "button[aria-label='Submit application']")
-            error_locator = (By.CLASS_NAME, "artdeco-inline-feedback__message")
-            upload_resume_locator = (By.XPATH, '//span[text()="Upload resume"]')
-            upload_cv_locator = (By.XPATH, '//span[text()="Upload cover letter"]')
-            follow_locator = (By.CSS_SELECTOR, "label[for='follow-company-checkbox']")
-
-            submitted = False
-            loop = 0
-            while loop < 2:
-                time.sleep(1)
-                
-                # Upload resume
-                if is_present(upload_resume_locator):
-                    try:
-                        resume_locator = self.browser.find_element(
-                            By.XPATH, 
-                            "//*[contains(@id, 'jobs-document-upload-file-input-upload-resume')]"
-                        )
-                        resume_locator.send_keys(selected_resume)
-                    except Exception as e:
-                        log.error(f"Resume upload failed: {e}")
-                        log.debug(f"Resume: {selected_resume}")
-
-                # Upload cover letter if available
-                if is_present(upload_cv_locator) and "Cover Letter" in self.uploads:
-                    try:
-                        cv_locator = self.browser.find_element(
-                            By.XPATH, 
-                            "//*[contains(@id, 'jobs-document-upload-file-input-upload-cover-letter')]"
-                        )
-                        cv_locator.send_keys(self.uploads["Cover Letter"])
-                    except Exception as e:
-                        log.error(f"Cover letter upload failed: {e}")
-
-                # Handle follow checkbox if present
-                elif len(self.get_elements("follow")) > 0:
-                    elements = self.get_elements("follow")
-                    for element in elements:
-                        button = self.wait.until(EC.element_to_be_clickable(element))
-                        button.click()
-
-                # Submit application if possible
-                if len(self.get_elements("submit")) > 0:
-                    elements = self.get_elements("submit")
-                    for element in elements:
-                        button = self.wait.until(EC.element_to_be_clickable(element))
-                        button.click()
-                        log.info("Application Submitted")
-                        submitted = True
-                        break
-
-                # Handle errors or additional questions
-                elif len(self.get_elements("error")) > 0:
-                    elements = self.get_elements("error")
-                    if "application was sent" in self.browser.page_source:
-                        log.info("Application Submitted")
-                        submitted = True
-                        break
-                    elif len(elements) > 0:
-                        while len(elements) > 0:
-                            log.info("Please answer the questions, waiting 5 seconds...")
-                            time.sleep(5)
-                            elements = self.get_elements("error")
-
-                            for element in elements:
-                                self.process_questions()
-
-                            if "application was sent" in self.browser.page_source:
-                                log.info("Application Submitted")
-                                submitted = True
-                                break
-                            elif is_present(self.locator["easy_apply_button"]):
-                                log.info("Skipping application")
-                                submitted = False
-                                break
-                        continue
-
-                    else:
-                        log.info("Application not submitted")
-                        time.sleep(2)
-                        break
-
-                # Continue through application steps
-                elif len(self.get_elements("next")) > 0:
-                    elements = self.get_elements("next")
-                    for element in elements:
-                        button = self.wait.until(EC.element_to_be_clickable(element))
-                        button.click()
-
-                elif len(self.get_elements("review")) > 0:
-                    elements = self.get_elements("review")
-                    for element in elements:
-                        button = self.wait.until(EC.element_to_be_clickable(element))
-                        button.click()
-
-                elif len(self.get_elements("follow")) > 0:
-                    elements = self.get_elements("follow")
-                    for element in elements:
-                        button = self.wait.until(EC.element_to_be_clickable(element))
-                        button.click()
-
-                loop += 1
-
+            for resume in self.uploads["resumes"]:
+                if any(keyword.lower() in job_title for keyword in resume["keywords"]):
+                    selected_resume = resume["path"]
+                    log.info(f"Selected resume: {resume['name']}")
+                    break
+        
         except Exception as e:
-            log.error(f"Error in send_resume: {e}")
-            log.error("Cannot apply to this job")
-            return False
+            log.warning(f"Could not select resume by keywords: {e}") 
+
+        # Verify resume exists
+        if not os.path.exists(selected_resume):
+            log.error(f"Resume file not found: {selected_resume}")
+            return False 
+
+           
+
+        # Locators
+        next_locator = (By.CSS_SELECTOR, "button[aria-label='Continue to next step']")
+        review_locator = (By.CSS_SELECTOR, "button[aria-label='Review your application']")
+        submit_locator = (By.CSS_SELECTOR, "button[aria-label='Submit application']")
+        error_locator = (By.CLASS_NAME, "artdeco-inline-feedback__message")
+        upload_resume_locator = (By.XPATH, '//span[text()="Upload resume"]')
+        upload_cv_locator = (By.XPATH, '//span[text()="Upload cover letter"]')
+        follow_locator = (By.CSS_SELECTOR, "label[for='follow-company-checkbox']")
+
+        submitted = False
+        loop = 0
+        while loop < 2:
+            time.sleep(1)
+            
+            # Upload resume
+            if is_present(upload_resume_locator):
+                try:
+                    # More reliable way to find upload element
+                    upload_element = self.wait.until(
+                        EC.presence_of_element_located(
+                            (By.XPATH, "//input[@type='file' and contains(@id,'resume')]")
+                        )
+                    )
+                    upload_element.send_keys(self.uploads["Resume"])
+                    time.sleep(2)  # Wait for upload to complete
+                    
+                    # Verify upload succeeded
+                    if "Error" in self.browser.page_source:
+                        log.error("Resume upload failed")
+                        return False
+                except Exception as e:
+                    log.error(f"Resume upload failed: {e}")
+                    log.debug(f"Resume: {selected_resume}")
+
+            # Upload cover letter if available
+            if is_present(upload_cv_locator) and "cover_letter" in self.uploads:
+                try:
+                    cv_locator = self.browser.find_element(
+                        By.XPATH, 
+                        "//*[contains(@id, 'jobs-document-upload-file-input-upload-cover-letter')]"
+                    )
+                    cv_locator.send_keys(self.uploads["Cover Letter"])
+                except Exception as e:
+                    log.error(f"Cover letter upload failed: {e}")
+
+            # Handle follow checkbox if present
+            elif len(self.get_elements("follow")) > 0:
+                elements = self.get_elements("follow")
+                for element in elements:
+                    button = self.wait.until(EC.element_to_be_clickable(element))
+                    button.click()
+
+            # Submit application if possible
+            if len(self.get_elements("submit")) > 0:
+                elements = self.get_elements("submit")
+                for element in elements:
+                    button = self.wait.until(EC.element_to_be_clickable(element))
+                    button.click()
+                    log.info("Application Submitted")
+                    submitted = True
+                    break
+
+            # Handle errors or additional questions
+            elif len(self.get_elements("error")) > 0:
+                elements = self.get_elements("error")
+                if "application was sent" in self.browser.page_source:
+                    log.info("Application Submitted")
+                    submitted = True
+                    break
+                elif len(elements) > 0:
+                    while len(elements) > 0:
+                        log.info("Please answer the questions, waiting 5 seconds...")
+                        time.sleep(5)
+                        elements = self.get_elements("error")
+
+                        for element in elements:
+                            self.process_questions()
+
+                        if "application was sent" in self.browser.page_source:
+                            log.info("Application Submitted")
+                            submitted = True
+                            break
+                        elif is_present(self.locator["easy_apply_button"]):
+                            log.info("Skipping application")
+                            submitted = False
+                            break
+                    continue
+
+                else:
+                    log.info("Application not submitted")
+                    time.sleep(2)
+                    break
+
+            # Continue through application steps
+            elif len(self.get_elements("next")) > 0:
+                elements = self.get_elements("next")
+                for element in elements:
+                    button = self.wait.until(EC.element_to_be_clickable(element))
+                    button.click()
+
+            elif len(self.get_elements("review")) > 0:
+                elements = self.get_elements("review")
+                for element in elements:
+                    button = self.wait.until(EC.element_to_be_clickable(element))
+                    button.click()
+
+            elif len(self.get_elements("follow")) > 0:
+                elements = self.get_elements("follow")
+                for element in elements:
+                    button = self.wait.until(EC.element_to_be_clickable(element))
+                    button.click()
+
+            loop += 1
+
+   
 
         return submitted
         
